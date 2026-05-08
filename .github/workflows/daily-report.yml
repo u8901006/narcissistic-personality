@@ -1,0 +1,90 @@
+name: NPD Daily Report
+
+on:
+  schedule:
+    - cron: "20 13 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Target date (YYYY-MM-DD), leave empty for today"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Determine date
+        id: date
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            echo "target=${{ github.event.inputs.date }}" >> "$GITHUB_OUTPUT"
+          else
+            TARGET=$(TZ=Asia/Taipei date +%Y-%m-%d)
+            echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch papers from PubMed
+        run: node scripts/fetch_papers.mjs --days 7 --max-papers 50 --output papers.json
+        timeout-minutes: 5
+
+      - name: Check papers data
+        id: papers
+        run: |
+          if [ -f papers.json ] && [ -s papers.json ]; then
+            COUNT=$(node -e "const d=JSON.parse(require('fs').readFileSync('papers.json','utf8'));console.log(d.papers.length)")
+            echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+            echo "Papers found: $COUNT"
+            if [ "$COUNT" -eq 0 ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo '{"date":"${{ steps.date.outputs.target }}","count":0,"papers":[]}' > papers.json
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate report with GLM AI
+        if: steps.papers.outputs.skip != 'true'
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          REPORT_DATE: ${{ steps.date.outputs.target }}
+        run: node scripts/generate_report.mjs --input papers.json --output docs/npd-${{ steps.date.outputs.target }}.html
+        timeout-minutes: 8
+
+      - name: Generate index page
+        if: steps.papers.outputs.skip != 'true'
+        run: node scripts/generate_index.mjs
+
+      - name: Commit and push
+        if: steps.papers.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/ data/
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "NPD daily report: ${{ steps.date.outputs.target }}"
+          git pull --rebase origin main
+          git push
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### NPD Daily Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Date:** ${{ steps.date.outputs.target }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Papers analyzed:** ${{ steps.papers.outputs.count }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Report:** [npd-${{ steps.date.outputs.target }}.html](https://u8901006.github.io/narcissistic-personality/npd-${{ steps.date.outputs.target }}.html)" >> "$GITHUB_STEP_SUMMARY"
