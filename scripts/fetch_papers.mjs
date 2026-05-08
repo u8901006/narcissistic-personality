@@ -17,6 +17,12 @@ const OUTPUT = args.output;
 const ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi";
 const ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi";
 const HEADERS = { "User-Agent": "NPDResearchBot/1.0 (research aggregator)" };
+const NCBI_API_KEY = process.env.NCBI_API_KEY || "";
+const DELAY_MS = NCBI_API_KEY ? 120 : 500;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function getDateNDaysAgo(n) {
   const d = new Date();
@@ -62,7 +68,18 @@ function loadSummarizedPmids() {
 
 async function searchPubMed(query, retmax = 50) {
   const mindate = getDateNDaysAgo(DAYS);
-  const url = `${ESEARCH}?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&sort=date&retmode=json&datetype=pdat&mindate=${mindate}&maxdate=3000/12/31`;
+  const params = new URLSearchParams({
+    db: "pubmed",
+    term: query,
+    retmax: String(retmax),
+    sort: "date",
+    retmode: "json",
+    datetype: "pdat",
+    mindate,
+    maxdate: "3000/12/31",
+  });
+  if (NCBI_API_KEY) params.set("api_key", NCBI_API_KEY);
+  const url = `${ESEARCH}?${params}`;
   const resp = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(30000) });
   if (!resp.ok) throw new Error(`PubMed search failed: ${resp.status}`);
   const data = await resp.json();
@@ -71,8 +88,13 @@ async function searchPubMed(query, retmax = 50) {
 
 async function fetchSummaries(pmids) {
   if (!pmids.length) return [];
-  const ids = pmids.join(",");
-  const url = `${ESUMMARY}?db=pubmed&id=${ids}&retmode=json`;
+  const params = new URLSearchParams({
+    db: "pubmed",
+    id: pmids.join(","),
+    retmode: "json",
+  });
+  if (NCBI_API_KEY) params.set("api_key", NCBI_API_KEY);
+  const url = `${ESUMMARY}?${params}`;
   const resp = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(60000) });
   if (!resp.ok) throw new Error(`PubMed summary failed: ${resp.status}`);
   const data = await resp.json();
@@ -113,6 +135,7 @@ async function main() {
     } catch (e) {
       console.error(`[WARN] Query ${i + 1} failed: ${e.message}`);
     }
+    if (i < SEARCH_QUERIES.length - 1) await sleep(DELAY_MS);
   }
 
   let pmidList = [...allPmids];
@@ -131,7 +154,16 @@ async function main() {
       papers = papers.concat(batchPapers);
     } catch (e) {
       console.error(`[WARN] Fetch batch failed: ${e.message}`);
+      if (i + BATCH < pmidList.length) {
+        console.error(`[INFO] Retrying after delay...`);
+        await sleep(2000);
+        try {
+          const retryPapers = await fetchSummaries(batch);
+          papers = papers.concat(retryPapers);
+        } catch { /* skip */ }
+      }
     }
+    if (i + BATCH < pmidList.length) await sleep(DELAY_MS);
   }
 
   console.error(`[INFO] Fetched ${papers.length} papers`);
